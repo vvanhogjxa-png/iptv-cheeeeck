@@ -37,9 +37,10 @@ def parse_iptv_url(raw: str):
         return None
 
 
-async def check_iptv(session: aiohttp.ClientSession, url: str, timeout: int = 10):
+async def check_iptv(session: aiohttp.ClientSession, url: str, timeout: int = 25, retries: int = 2):
     """
     Call the Xtream Codes player_api.php and return a result dict.
+    Retries up to `retries` times on timeout or connection error.
     """
     parsed = parse_iptv_url(url)
     if not parsed:
@@ -48,73 +49,80 @@ async def check_iptv(session: aiohttp.ClientSession, url: str, timeout: int = 10
     base, username, password = parsed
     api_url = f"{base}/player_api.php?username={username}&password={password}"
 
-    try:
-        async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-            if resp.status != 200:
-                return {"url": url, "status": f"❌ HTTP {resp.status}", "ok": False}
-            data = await resp.json(content_type=None)
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                if resp.status != 200:
+                    return {"url": url, "status": f"❌ HTTP {resp.status}", "ok": False}
+                data = await resp.json(content_type=None)
 
-            user_info = data.get("user_info", {})
-            server_info = data.get("server_info", {})
+                user_info = data.get("user_info", {})
+                server_info = data.get("server_info", {})
 
-            auth = user_info.get("auth", 0)
-            if not auth:
-                return {"url": url, "status": "❌ Auth failed (wrong user/pass)", "ok": False}
+                auth = user_info.get("auth", 0)
+                if not auth:
+                    return {"url": url, "status": "❌ Auth failed (wrong user/pass)", "ok": False}
 
-            status = user_info.get("status", "unknown")
-            exp_ts = user_info.get("exp_date")
-            max_conn = user_info.get("max_connections", "?")
-            active_conn = user_info.get("active_cons", "?")
-            is_trial = user_info.get("is_trial", "0")
+                status = user_info.get("status", "unknown")
+                exp_ts = user_info.get("exp_date")
+                max_conn = user_info.get("max_connections", "?")
+                active_conn = user_info.get("active_cons", "?")
+                is_trial = user_info.get("is_trial", "0")
 
-            # expiry
-            if exp_ts:
-                try:
-                    exp_date = datetime.utcfromtimestamp(int(exp_ts)).strftime("%Y-%m-%d")
-                    now = datetime.utcnow()
-                    diff = datetime.utcfromtimestamp(int(exp_ts)) - now
-                    days_left = diff.days
-                    if days_left < 0:
-                        exp_str = f"{exp_date} (⚠️ EXPIRED)"
-                    elif days_left == 0:
-                        exp_str = f"{exp_date} (⚠️ expires TODAY)"
-                    else:
-                        exp_str = f"{exp_date} ({days_left}d left)"
-                except Exception:
-                    exp_str = str(exp_ts)
-            else:
-                exp_str = "Unlimited"
+                # expiry
+                if exp_ts:
+                    try:
+                        exp_date = datetime.utcfromtimestamp(int(exp_ts)).strftime("%Y-%m-%d")
+                        now = datetime.utcnow()
+                        diff = datetime.utcfromtimestamp(int(exp_ts)) - now
+                        days_left = diff.days
+                        if days_left < 0:
+                            exp_str = f"{exp_date} (⚠️ EXPIRED)"
+                        elif days_left == 0:
+                            exp_str = f"{exp_date} (⚠️ expires TODAY)"
+                        else:
+                            exp_str = f"{exp_date} ({days_left}d left)"
+                    except Exception:
+                        exp_str = str(exp_ts)
+                else:
+                    exp_str = "Unlimited"
 
-            # status emoji
-            if status == "Active":
-                status_icon = "✅"
-            elif status == "Expired":
-                status_icon = "❌"
-            elif status == "Banned":
-                status_icon = "🚫"
-            else:
-                status_icon = "⚠️"
+                # status emoji
+                if status == "Active":
+                    status_icon = "✅"
+                elif status == "Expired":
+                    status_icon = "❌"
+                elif status == "Banned":
+                    status_icon = "🚫"
+                else:
+                    status_icon = "⚠️"
 
-            server_url = f"{server_info.get('url', base)}:{server_info.get('port', '')}"
+                server_url = f"{server_info.get('url', base)}:{server_info.get('port', '')}"
 
-            return {
-                "url": url,
-                "ok": status == "Active",
-                "status": f"{status_icon} {status}",
-                "username": username,
-                "expiry": exp_str,
-                "max_conn": max_conn,
-                "active_conn": active_conn,
-                "is_trial": is_trial == "1",
-                "server": server_url,
-            }
+                return {
+                    "url": url,
+                    "ok": status == "Active",
+                    "status": f"{status_icon} {status}",
+                    "username": username,
+                    "expiry": exp_str,
+                    "max_conn": max_conn,
+                    "active_conn": active_conn,
+                    "is_trial": is_trial == "1",
+                    "server": server_url,
+                }
 
-    except asyncio.TimeoutError:
-        return {"url": url, "status": "⏱️ Timeout (server not responding)", "ok": False}
-    except aiohttp.ClientConnectorError:
-        return {"url": url, "status": "🔌 Cannot connect to server", "ok": False}
-    except Exception as e:
-        return {"url": url, "status": f"❌ Error: {str(e)[:60]}", "ok": False}
+        except asyncio.TimeoutError:
+            last_error = f"⏱️ Timeout after {timeout}s"
+            if attempt < retries:
+                await asyncio.sleep(2)
+            continue
+        except aiohttp.ClientConnectorError:
+            return {"url": url, "status": "🔌 Cannot connect to server", "ok": False}
+        except Exception as e:
+            return {"url": url, "status": f"❌ Error: {str(e)[:60]}", "ok": False}
+
+    return {"url": url, "status": f"⏱️ Timeout after {retries} attempts ({timeout}s each)", "ok": False}
 
 
 def format_result(r: dict, index: int) -> str:
