@@ -11,11 +11,18 @@ from urllib.parse import urlparse, parse_qs
 
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID   = int(os.environ.get("ADMIN_ID", "0"))
-PROXY_URL  = os.environ.get("PROXY_URL", "")   # e.g. http://user:pass@host:port
+PROXY_URL  = os.environ.get("PROXY_URL", "")
 MAX_URLS   = 50
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
+def esc(text: str) -> str:
+    """Escape special characters for Telegram MarkdownV2."""
+    for ch in r"\_*[]()~`>#+-=|{}.!":
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
 
 def parse_iptv_url(raw: str):
     raw = raw.strip()
@@ -69,9 +76,9 @@ async def check_iptv(session: aiohttp.ClientSession, url: str, timeout: int = 25
                         exp_date  = exp_dt.strftime("%Y-%m-%d")
                         days_left = (exp_dt - datetime.utcnow()).days
                         if days_left < 0:
-                            exp_str = f"{exp_date} (⚠️ EXPIRED)"
+                            exp_str = f"{exp_date} (EXPIRED)"
                         elif days_left == 0:
-                            exp_str = f"{exp_date} (⚠️ expires TODAY)"
+                            exp_str = f"{exp_date} (expires TODAY)"
                         else:
                             exp_str = f"{exp_date} ({days_left}d left)"
                     except Exception:
@@ -104,19 +111,24 @@ async def check_iptv(session: aiohttp.ClientSession, url: str, timeout: int = 25
 
 
 def format_result(r: dict, index: int) -> str:
+    """Format a single result using MarkdownV2 with all values escaped."""
     short_url = r['url'][:60] + "..." if len(r['url']) > 60 else r['url']
-    lines = [f"━━━━━━━━━━━━━━━━━━━━", f"🔢 #{index}  `{short_url}`"]
+
+    lines = [
+        esc("━━━━━━━━━━━━━━━━━━━━"),
+        f"🔢 \\#{index}  `{esc(short_url)}`",
+    ]
 
     if r.get("ok") is False and "username" not in r:
-        lines.append(f"Status: {r['status']}")
+        lines.append(f"Status: {esc(r['status'])}")
     else:
-        lines.append(f"Status:   {r['status']}")
-        lines.append(f"User:     `{r.get('username', '?')}`")
-        lines.append(f"Expires:  {r.get('expiry', '?')}")
-        lines.append(f"Conns:    {r.get('active_conn', '?')} / {r.get('max_conn', '?')}")
+        lines.append(f"Status:   {esc(r['status'])}")
+        lines.append(f"User:     `{esc(str(r.get('username', '?')))}`")
+        lines.append(f"Expires:  {esc(str(r.get('expiry', '?')))}")
+        lines.append(f"Conns:    {esc(str(r.get('active_conn', '?')))} / {esc(str(r.get('max_conn', '?')))}")
         if r.get("is_trial"):
             lines.append("🧪 Trial account")
-        lines.append(f"Server:   `{r.get('server', '?')}`")
+        lines.append(f"Server:   `{esc(str(r.get('server', '?')))}`")
 
     return "\n".join(lines)
 
@@ -126,9 +138,9 @@ def format_summary(results: list) -> str:
     ok    = sum(1 for r in results if r.get("ok"))
     return (
         f"📊 *Summary*\n"
-        f"Total checked: {total}\n"
-        f"✅ Active: {ok}\n"
-        f"❌ Failed/Expired: {total - ok}"
+        f"Total checked: {esc(str(total))}\n"
+        f"✅ Active: {esc(str(ok))}\n"
+        f"❌ Failed/Expired: {esc(str(total - ok))}"
     )
 
 
@@ -142,34 +154,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         await update.message.reply_text("🚫 Access denied.")
         return
-    proxy_status = f"✅ Proxy active" if PROXY_URL else "⚠️ No proxy (direct connection)"
+    proxy_status = "✅ Proxy active" if PROXY_URL else "⚠️ No proxy \\(direct connection\\)"
     text = (
         "👋 *IPTV Bulk Checker Bot*\n\n"
-        "Send me one or more IPTV URLs (one per line) and I'll check them all!\n\n"
+        "Send me one or more IPTV URLs \\(one per line\\) and I'll check them all\\!\n\n"
         "*Supported formats:*\n"
-        "`http://host:port/get.php?username=X&password=Y`\n"
-        "`http://host:port/player_api.php?username=X&password=Y`\n\n"
-        f"Max {MAX_URLS} URLs per message.\n"
+        "`http://host:port/get\\.php?username=X&password=Y`\n"
+        "`http://host:port/player\\_api\\.php?username=X&password=Y`\n\n"
+        f"Max {MAX_URLS} URLs per message\\.\n"
         f"Connection: {proxy_status}\n\n"
         "Commands:\n"
         "/start — show this help\n"
         "/status — check proxy & bot status"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         await update.message.reply_text("🚫 Access denied.")
         return
-    proxy_status = f"✅ `{PROXY_URL[:30]}...`" if PROXY_URL else "❌ Not configured"
+    if PROXY_URL:
+        proxy_status = f"✅ `{esc(PROXY_URL[:40])}`"
+    else:
+        proxy_status = "❌ Not configured"
     text = (
         f"🤖 *Bot Status*\n\n"
         f"Proxy: {proxy_status}\n"
         f"Max URLs: {MAX_URLS}\n"
         f"Timeout: 25s × 2 retries"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 
 async def handle_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,13 +197,16 @@ async def handle_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not urls:
         await update.message.reply_text(
-            "⚠️ No valid URLs found. Each URL must start with `http://` or `https://`, one per line.",
-            parse_mode="Markdown"
+            "⚠️ No valid URLs found\\. Each URL must start with `http://` or `https://`, one per line\\.",
+            parse_mode="MarkdownV2"
         )
         return
 
     if len(urls) > MAX_URLS:
-        await update.message.reply_text(f"⚠️ Too many URLs! Max is {MAX_URLS}. You sent {len(urls)}.")
+        await update.message.reply_text(
+            f"⚠️ Too many URLs\\! Max is {MAX_URLS}\\. You sent {len(urls)}\\.",
+            parse_mode="MarkdownV2"
+        )
         return
 
     proxy_note = " via proxy 🔀" if PROXY_URL else ""
@@ -200,7 +218,7 @@ async def handle_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chunk, chunk_len = [], 0
 
     async def flush(c):
-        await update.message.reply_text("\n".join(c), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(c), parse_mode="MarkdownV2")
 
     for i, r in enumerate(results, 1):
         block = format_result(r, i)
@@ -214,7 +232,7 @@ async def handle_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chunk:
         await flush(chunk)
 
-    await update.message.reply_text(format_summary(results), parse_mode="Markdown")
+    await update.message.reply_text(format_summary(results), parse_mode="MarkdownV2")
 
     try:
         await msg.delete()
