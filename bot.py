@@ -2,289 +2,181 @@ import os
 import re
 import csv
 import asyncio
-import aiohttp
+import requests
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    ContextTypes, filters
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID  = int(os.environ.get("ADMIN_ID", "0"))
-PROXY_URL = os.environ.get("PROXY_URL", "")
-MAX_URLS  = 2000
-HEADERS   = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
-BATCH_SIZE = 50  # check 50 at a time to avoid overload
+TOKEN_BOT = os.getenv("TOKEN_BOT")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
+HEADERS = {
+    "User-Agent": "VLC/3.0.14 LibVLC/3.0.14",
+    "Accept": "*/*"
+}
 
-def parse_iptv_url(raw: str):
-    raw = raw.strip()
+def extract_links(text):
+    links = re.findall(r'https?://[^\s"\']+', text)
+    return list(dict.fromkeys(links))
+
+def parse_account(link):
+    p = urlparse(link)
+    qs = parse_qs(p.query)
+    username = qs.get("username", [None])[0]
+    password = qs.get("password", [None])[0]
+    if not username or not password:
+        return None, None, None
+    server = f"{p.scheme}://{p.netloc}"
+    return server, username, password
+
+def check_iptv(link):
+    parsed = parse_account(link)
+    if parsed[0] is None:
+        return ["INVALID", "No username/password", "", "", link]
+
+    server, username, password = parsed
+
+    # 1) Try player_api.php
     try:
-        p  = urlparse(raw)
-        qs = parse_qs(p.query)
-        username = qs.get("username", [None])[0]
-        password = qs.get("password", [None])[0]
-        if not username or not password:
-            return None
-        return f"{p.scheme}://{p.netloc}", username, password
-    except Exception:
-        return None
-
-
-def extract_urls(text: str):
-    found = re.findall(r'https?://[^\s"\'<>]+', text)
-    valid = [u for u in found if "username=" in u and "password=" in u]
-    return list(dict.fromkeys(valid))
-
-
-async def check_iptv(session: aiohttp.ClientSession, url: str, timeout: int = 25, retries: int = 2):
-    parsed = parse_iptv_url(url)
-    if not parsed:
-        return None  # skip invalid
-
-    base, username, password = parsed
-    kwargs = {"timeout": aiohttp.ClientTimeout(total=timeout), "headers": HEADERS}
-    if PROXY_URL:
-        kwargs["proxy"] = PROXY_URL
-
-    # --- Try player_api.php ---
-    for attempt in range(1, retries + 1):
-        try:
-            api_url = f"{base}/player_api.php?username={username}&password={password}"
-            async with session.get(api_url, **kwargs) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    if text.strip().startswith("{"):
-                        data      = await resp.json(content_type=None)
-                        user_info = data.get("user_info", {})
-                        if user_info.get("auth", 0):
-                            status = user_info.get("status", "Unknown")
-
-                            # Only return Active lines
-                            if status.lower() != "active":
-                                return None
-
-                            exp_ts      = user_info.get("exp_date")
-                            max_conn    = user_info.get("max_connections", "?")
-                            active_conn = user_info.get("active_cons", "?")
-
-                            if exp_ts and str(exp_ts).isdigit():
-                                exp_dt    = datetime.utcfromtimestamp(int(exp_ts))
-                                days_left = (exp_dt - datetime.utcnow()).days
-                                exp_str   = exp_dt.strftime("%Y-%m-%d")
-                                if days_left < 0:
-                                    exp_str += " (EXPIRED)"
-                                elif days_left == 0:
-                                    exp_str += " (expires TODAY)"
-                                else:
-                                    exp_str += f" ({days_left}d left)"
-                            else:
-                                exp_str = "Unlimited"
-
-                            return {
-                                "url": url, "status": "Active",
-                                "username": username, "expiry": exp_str,
-                                "conn": f"{active_conn}/{max_conn}", "server": base
-                            }
-                        else:
-                            return None  # auth failed = not active
-        except asyncio.TimeoutError:
-            if attempt < retries:
-                await asyncio.sleep(2)
-            continue
-        except Exception:
-            break
-
-    # --- Fallback: get.php ---
-    try:
-        get_url = f"{base}/get.php?username={username}&password={password}&type=m3u_plus"
-        async with session.get(get_url, **kwargs) as resp:
-            if resp.status == 200:
-                text = await resp.text()
-                if "#EXTM3U" in text or "#EXTINF" in text:
-                    return {
-                        "url": url, "status": "Active (playlist)",
-                        "username": username, "expiry": "Unknown",
-                        "conn": "-", "server": base
-                    }
-    except Exception:
+        r = requests.get(
+            f"{server}/player_api.php",
+            params={"username": username, "password": password},
+            headers=HEADERS,
+            timeout=20
+        )
+        if r.status_code == 200 and r.text.strip().startswith("{"):
+            data = r.json()
+            user = data.get("user_info", {})
+            exp = user.get("exp_date")
+            if exp and str(exp).isdigit():
+                exp = datetime.fromtimestamp(int(exp)).strftime("%Y-%m-%d")
+            else:
+                exp = "Unknown"
+            conn = f"{user.get('active_cons','0')}/{user.get('max_connections','?')}"
+            return [user.get("status", "UNKNOWN"), username, exp, conn, server]
+    except:
         pass
 
-    return None  # dead/blocked = skip
+    # 2) Try get.php with outputs
+    for output in ["ts", "mpegts", "m3u8"]:
+        try:
+            r = requests.get(
+                f"{server}/get.php",
+                params={"username": username, "password": password, "type": "m3u_plus", "output": output},
+                headers=HEADERS,
+                timeout=25
+            )
+            if r.status_code == 200 and ("#EXTM3U" in r.text or "#EXTINF" in r.text):
+                stream_test = "PLAYLIST_OK"
+                streams = re.findall(r'https?://[^\s]+', r.text)
+                for stream in streams[:5]:
+                    try:
+                        t = requests.get(stream, headers=HEADERS, timeout=10, stream=True)
+                        if t.status_code in [200, 206, 302]:
+                            stream_test = "STREAM_WORKING"
+                            break
+                        else:
+                            stream_test = f"STREAM_HTTP_{t.status_code}"
+                    except:
+                        stream_test = "STREAM_ERROR"
+                return [f"VALID_{output}", username, "Unknown", stream_test, server]
+        except:
+            pass
 
-
-def is_admin(update: Update) -> bool:
-    return update.effective_user.id == ADMIN_ID
+    return ["UNKNOWN_BLOCKED_OR_DEAD", username, "", "", server]
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    proxy = "✅ Active" if PROXY_URL else "❌ Not set"
+    if update.effective_user.id != ADMIN_ID:
+        return
     await update.message.reply_text(
-        f"IPTV Bulk Checker Bot\n\n"
-        f"Proxy: {proxy}\n\n"
-        f"How to use:\n"
-        f"1. Paste URLs directly (one per line)\n"
-        f"2. Send a .txt file → get a .csv with ACTIVE lines only\n\n"
-        f"/status — show bot info"
+        "Salam bro ✅\n"
+        "Sift lia TXT file fih IPTV links, ana ncheckihom w nrj3 lik results.csv"
     )
 
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    proxy = f"Active: {PROXY_URL[:30]}..." if PROXY_URL else "Not configured"
-    await update.message.reply_text(
-        f"Bot Status\n"
-        f"Proxy: {proxy}\n"
-        f"Max URLs: {MAX_URLS}\n"
-        f"Timeout: 25s x 2 retries\n"
-        f"Batch size: {BATCH_SIZE}"
-    )
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-
-    urls = extract_urls(update.message.text)
-    if not urls:
-        await update.message.reply_text("No valid IPTV URLs found.")
+async def handle_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
-    if len(urls) > MAX_URLS:
-        await update.message.reply_text(f"Too many URLs! Max is {MAX_URLS}.")
-        return
-
-    msg = await update.message.reply_text(f"Checking {len(urls)} URL(s)...")
-
-    async with aiohttp.ClientSession() as session:
-        results = await asyncio.gather(*[check_iptv(session, u) for u in urls])
-
-    active_results = [r for r in results if r is not None]
-
-    if not active_results:
-        await update.message.reply_text("No active lines found.")
-        try: await msg.delete()
-        except: pass
-        return
-
-    lines = []
-    for i, r in enumerate(active_results, 1):
-        block = (
-            f"{'='*22}\n"
-            f"#{i} ✅ {r['status']}\n"
-            f"User:    {r['username']}\n"
-            f"Expires: {r['expiry']}\n"
-            f"Conns:   {r['conn']}\n"
-            f"Server:  {r['server']}"
-        )
-        lines.append(block)
-
-    chunk, chunk_len = [], 0
-    for block in lines:
-        if chunk_len + len(block) > 3800:
-            await update.message.reply_text("\n".join(chunk))
-            chunk, chunk_len = [block], len(block)
-        else:
-            chunk.append(block)
-            chunk_len += len(block)
-    if chunk:
-        await update.message.reply_text("\n".join(chunk))
-
-    await update.message.reply_text(
-        f"Summary\n"
-        f"Checked: {len(urls)}\n"
-        f"Active:  {len(active_results)}\n"
-        f"Failed:  {len(urls) - len(active_results)}"
-    )
-
-    try: await msg.delete()
-    except: pass
-
-
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
 
     doc = update.message.document
     if not doc:
         return
 
-    msg = await update.message.reply_text("Downloading file...")
+    await update.message.reply_text("📥 File received. Checking IPTV links...")
 
-    file     = await doc.get_file()
-    tmp_path = f"/tmp/iptv_input_{update.update_id}.txt"
-    await file.download_to_drive(tmp_path)
+    tg_file = await doc.get_file()
+    await tg_file.download_to_drive("input.txt")
 
-    with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open("input.txt", "r", encoding="utf-8", errors="ignore") as f:
         text = f.read()
 
-    urls = extract_urls(text)
-    if not urls:
-        await msg.edit_text("No valid IPTV URLs found in the file.")
+    links = extract_links(text)
+    if not links:
+        await update.message.reply_text("❌ Ma l9itch IPTV links f file.")
         return
 
-    total = len(urls)
-    await msg.edit_text(f"Found {total} URLs. Checking... (this may take a while)")
+    await update.message.reply_text(f"🔍 Found {len(links)} links. Starting check...")
 
-    # Process in batches and update progress
-    all_results = []
-    async with aiohttp.ClientSession() as session:
-        for i in range(0, total, BATCH_SIZE):
-            batch   = urls[i:i + BATCH_SIZE]
-            results = await asyncio.gather(*[check_iptv(session, u) for u in batch])
-            all_results.extend(results)
-            done = min(i + BATCH_SIZE, total)
-            try:
-                await msg.edit_text(f"Progress: {done}/{total} checked...")
-            except:
-                pass
+    results = []
+    for i, link in enumerate(links, 1):
+        res = await asyncio.to_thread(check_iptv, link)
+        results.append(res)
+        if i % 20 == 0:
+            await update.message.reply_text(f"✅ Checked {i}/{len(links)}")
 
-    active_results = [r for r in all_results if r is not None]
-
-    if not active_results:
-        await msg.edit_text(f"Done. No active lines found out of {total} checked.")
-        return
-
-    # Write CSV — active only
-    csv_path = f"/tmp/iptv_results_{update.update_id}.csv"
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["Status", "Username", "Expiry", "Connections", "Server", "URL"])
-        for r in active_results:
-            w.writerow([r["status"], r["username"], r["expiry"], r["conn"], r["server"], r["url"]])
+    with open("results.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Status", "User/Error", "Expire", "Conn_or_Stream", "Server"])
+        writer.writerows(results)
 
     await update.message.reply_document(
-        document=open(csv_path, "rb"),
-        filename="active_lines.csv",
-        caption=(
-            f"Done! Active lines only.\n"
-            f"Checked: {total}\n"
-            f"Active:  {len(active_results)}\n"
-            f"Failed:  {total - len(active_results)}"
-        )
+        open("results.csv", "rb"),
+        filename="results.csv",
+        caption="✅ Finished. Hadi results.csv"
     )
 
-    try: await msg.delete()
-    except: pass
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
 
+    text = update.message.text or ""
+    links = extract_links(text)
+    if not links:
+        await update.message.reply_text("Sift TXT file ola paste IPTV links.")
+        return
+
+    await update.message.reply_text(f"🔍 Found {len(links)} links. Checking...")
+
+    results = []
+    for i, link in enumerate(links, 1):
+        res = await asyncio.to_thread(check_iptv, link)
+        results.append(res)
+        if i % 20 == 0:
+            await update.message.reply_text(f"✅ Checked {i}/{len(links)}")
+
+    with open("results.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Status", "User/Error", "Expire", "Conn_or_Stream", "Server"])
+        writer.writerows(results)
+
+    await update.message.reply_document(
+        open("results.csv", "rb"),
+        filename="results.csv",
+        caption="✅ Finished."
+    )
 
 def main():
-    if not BOT_TOKEN: raise ValueError("BOT_TOKEN is not set!")
-    if not ADMIN_ID:  raise ValueError("ADMIN_ID is not set!")
+    if not TOKEN_BOT:
+        raise RuntimeError("TOKEN_BOT missing in Railway Variables")
 
-    print(f"IPTV Checker Bot starting...")
-    print(f"  Admin:  {ADMIN_ID}")
-    print(f"  Proxy:  {PROXY_URL or 'None'}")
-
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",  start))
-    app.add_handler(CommandHandler("help",   start))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app = Application.builder().token(TOKEN_BOT).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_txt))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
+    print("Bot is running...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
