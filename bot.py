@@ -444,7 +444,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting_account'] = False
         context.user_data['awaiting_codes'] = False
 
-async def main_app():
+def main():
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN not set!")
         return
@@ -461,7 +461,7 @@ async def main_app():
     app.add_error_handler(lambda update, context: print(f"Error: {context.error}"))
 
     print("🚀 Bot started!")
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main_app())
+    main()
