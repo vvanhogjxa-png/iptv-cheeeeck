@@ -12,7 +12,7 @@ from datetime import datetime
 import uuid
 from colorama import init, Fore, Style
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 import queue
 from concurrent.futures import ThreadPoolExecutor
 
@@ -295,7 +295,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == 'check_code':
         await query.edit_message_text(
-            text="📝 Send me Microsoft codes to check (one per line or in a text file):",
+            text="📝 Send me Microsoft codes to check (one per line):",
             reply_markup=None
         )
         context.user_data['awaiting_codes'] = True
@@ -445,23 +445,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting_codes'] = False
 
 async def main_app():
-    app = Application.builder().token(BOT_TOKEN).build()
-
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN not set!")
         return
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Callback query handler
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
-    
-    app.add_error_handler(lambda update, context: print(f"Error: {context.error}"))
+    if ADMIN_ID == 0:
+        print("❌ ADMIN_ID not set!")
+        return
 
-    # Add button handler
-    from telegram.ext import CallbackQueryHandler
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_click))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(lambda update, context: print(f"Error: {context.error}"))
 
     print("🚀 Bot started!")
     await app.run_polling()

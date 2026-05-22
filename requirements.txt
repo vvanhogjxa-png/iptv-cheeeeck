@@ -1,2 +1,5 @@
-python-telegram-bot==21.5
-requests
+python-telegram-bot==21.1
+curl_cffi==0.5.9
+requests==2.31.0
+colorama==0.4.6
+aiohttp==3.9.1
