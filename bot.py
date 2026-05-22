@@ -1,182 +1,150 @@
 import os
-import re
-import csv
-import asyncio
 import requests
+import random
+import time
+import json
+import zipfile
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-TOKEN_BOT = os.getenv("TOKEN_BOT")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# ====================== CONFIG ======================
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 
-HEADERS = {
-    "User-Agent": "VLC/3.0.14 LibVLC/3.0.14",
-    "Accept": "*/*"
-}
+total_checks = 0
+live_count = 0
+premium_count = 0
 
-def extract_links(text):
-    links = re.findall(r'https?://[^\s"\']+', text)
-    return list(dict.fromkeys(links))
+print("🚀 Netflix Cookies Checker Pro v3.2 Started")
 
-def parse_account(link):
-    p = urlparse(link)
-    qs = parse_qs(p.query)
-    username = qs.get("username", [None])[0]
-    password = qs.get("password", [None])[0]
-    if not username or not password:
-        return None, None, None
-    server = f"{p.scheme}://{p.netloc}"
-    return server, username, password
-
-def check_iptv(link):
-    parsed = parse_account(link)
-    if parsed[0] is None:
-        return ["INVALID", "No username/password", "", "", link]
-
-    server, username, password = parsed
-
-    # 1) Try player_api.php
+# ====================== CHECK FUNCTION ======================
+def check_netflix_cookies(cookies_text: str):
+    global total_checks, live_count, premium_count
+    total_checks += 1
+    
     try:
-        r = requests.get(
-            f"{server}/player_api.php",
-            params={"username": username, "password": password},
-            headers=HEADERS,
-            timeout=20
-        )
-        if r.status_code == 200 and r.text.strip().startswith("{"):
-            data = r.json()
-            user = data.get("user_info", {})
-            exp = user.get("exp_date")
-            if exp and str(exp).isdigit():
-                exp = datetime.fromtimestamp(int(exp)).strftime("%Y-%m-%d")
-            else:
-                exp = "Unknown"
-            conn = f"{user.get('active_cons','0')}/{user.get('max_connections','?')}"
-            return [user.get("status", "UNKNOWN"), username, exp, conn, server]
-    except:
-        pass
+        cookies = {}
+        for line in cookies_text.splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                key, value = line.split("=", 1)
+                cookies[key.strip()] = value.strip()
 
-    # 2) Try get.php with outputs
-    for output in ["ts", "mpegts", "m3u8"]:
-        try:
-            r = requests.get(
-                f"{server}/get.php",
-                params={"username": username, "password": password, "type": "m3u_plus", "output": output},
-                headers=HEADERS,
-                timeout=25
-            )
-            if r.status_code == 200 and ("#EXTM3U" in r.text or "#EXTINF" in r.text):
-                stream_test = "PLAYLIST_OK"
-                streams = re.findall(r'https?://[^\s]+', r.text)
-                for stream in streams[:5]:
-                    try:
-                        t = requests.get(stream, headers=HEADERS, timeout=10, stream=True)
-                        if t.status_code in [200, 206, 302]:
-                            stream_test = "STREAM_WORKING"
-                            break
-                        else:
-                            stream_test = f"STREAM_HTTP_{t.status_code}"
-                    except:
-                        stream_test = "STREAM_ERROR"
-                return [f"VALID_{output}", username, "Unknown", stream_test, server]
-        except:
-            pass
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        }
 
-    return ["UNKNOWN_BLOCKED_OR_DEAD", username, "", "", server]
+        r = requests.get("https://www.netflix.com/api/shakti/mdx", 
+                        cookies=cookies, 
+                        headers=headers, 
+                        timeout=15)
 
+        if r.status_code == 200:
+            live_count += 1
+            try:
+                data = r.json()
+                plan = data.get("plan", {}).get("name", "Unknown")
+                is_premium = "premium" in plan.lower() or "4k" in plan.lower() or "uhd" in plan.lower()
+                
+                if is_premium:
+                    premium_count += 1
+                
+                return {
+                    "status": "✅ WORKING",
+                    "plan": plan,
+                    "premium": "⭐️ PREMIUM" if is_premium else "Normal",
+                    "profiles": len(data.get("profiles", {}))
+                }
+            except:
+                return {"status": "✅ WORKING (Basic)"}
+        else:
+            return {"status": "❌ DEAD"}
 
+    except Exception as e:
+        return {"status": "⚠️ ERROR", "reason": str(e)[:60]}
+
+# ====================== HANDLE ZIP FILE ======================
+def extract_zip(file_path):
+    results = []
+    with zipfile.ZipFile(file_path, 'r') as z:
+        for file_info in z.namelist():
+            if file_info.endswith(('.txt', '.json')):
+                with z.open(file_info) as f:
+                    content = f.read().decode('utf-8', errors='ignore')
+                    results.append(content)
+    return results
+
+# ====================== HANDLERS ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Access Denied!")
         return
     await update.message.reply_text(
-        "Salam bro ✅\n"
-        "Sift lia TXT file fih IPTV links, ana ncheckihom w nrj3 lik results.csv"
+        "🤖 Netflix Cookies Checker Pro v3.2\n\n"
+        "• أرسل كوكيز (نص)\n"
+        "• أرسل ملف txt/json/zip\n\n"
+        "/stats - إحصائيات\n"
+        "/premium - Premium Filter ON/OFF"
     )
 
-async def handle_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    success_rate = round((live_count / total_checks) * 100, 2) if total_checks > 0 else 0
+    await update.message.reply_text(
+        f"📊 Bot Statistics\n\n"
+        f"Total Checks: {total_checks}\n"
+        f"✅ Live: {live_count}\n"
+        f"⭐️ Premium: {premium_count}\n"
+        f"Success Rate: {success_rate}%\n"
+        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    doc = update.message.document
-    if not doc:
+    # Handle Document (txt, json, zip)
+    if update.message.document:
+        file = await update.message.document.get_file()
+        file_path = f"temp_{update.message.document.file_name}"
+        await file.download_to_drive(file_path)
+if file_path.endswith('.zip'):
+            contents = extract_zip(file_path)
+            for content in contents[:10]:  # Limit to 10 for safety
+                result = check_netflix_cookies(content)
+                await update.message.reply_text(f"{result.get('status')} - {result.get('plan', '')}")
+        else:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            result = check_netflix_cookies(content)
+            await update.message.reply_text(str(result))
+
+        os.remove(file_path)
         return
 
-    await update.message.reply_text("📥 File received. Checking IPTV links...")
+    # Handle Text Message
+    text = update.message.text.strip()
+    await update.message.reply_text("🔄 جاري الفحص...")
+    result = check_netflix_cookies(text)
+    
+    msg = f"{result.get('status', 'Unknown')}\n"
+    if "plan" in result:
+        msg += f"📌 Plan: {result['plan']}\n"
+    if "premium" in result:
+        msg += f"⭐️ {result['premium']}\n"
+    
+    await update.message.reply_text(msg)
 
-    tg_file = await doc.get_file()
-    await tg_file.download_to_drive("input.txt")
+# ====================== MAIN ======================
+if name == "main":
+    app = Application.builder().token(TOKEN).build()
 
-    with open("input.txt", "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
-
-    links = extract_links(text)
-    if not links:
-        await update.message.reply_text("❌ Ma l9itch IPTV links f file.")
-        return
-
-    await update.message.reply_text(f"🔍 Found {len(links)} links. Starting check...")
-
-    results = []
-    for i, link in enumerate(links, 1):
-        res = await asyncio.to_thread(check_iptv, link)
-        results.append(res)
-        if i % 20 == 0:
-            await update.message.reply_text(f"✅ Checked {i}/{len(links)}")
-
-    with open("results.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Status", "User/Error", "Expire", "Conn_or_Stream", "Server"])
-        writer.writerows(results)
-
-    await update.message.reply_document(
-        open("results.csv", "rb"),
-        filename="results.csv",
-        caption="✅ Finished. Hadi results.csv"
-    )
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    text = update.message.text or ""
-    links = extract_links(text)
-    if not links:
-        await update.message.reply_text("Sift TXT file ola paste IPTV links.")
-        return
-
-    await update.message.reply_text(f"🔍 Found {len(links)} links. Checking...")
-
-    results = []
-    for i, link in enumerate(links, 1):
-        res = await asyncio.to_thread(check_iptv, link)
-        results.append(res)
-        if i % 20 == 0:
-            await update.message.reply_text(f"✅ Checked {i}/{len(links)}")
-
-    with open("results.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Status", "User/Error", "Expire", "Conn_or_Stream", "Server"])
-        writer.writerows(results)
-
-    await update.message.reply_document(
-        open("results.csv", "rb"),
-        filename="results.csv",
-        caption="✅ Finished."
-    )
-
-def main():
-    if not TOKEN_BOT:
-        raise RuntimeError("TOKEN_BOT missing in Railway Variables")
-
-    app = Application.builder().token(TOKEN_BOT).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_txt))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
 
     print("Bot is running...")
-    app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+    app.run_polling()
