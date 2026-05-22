@@ -280,7 +280,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔐 Powered by curl_cffi\n\n"
         "Choose an option:",
         reply_markup=reply_markup,
-        parse_mode="Markdown"
     )
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -318,7 +317,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             text=stats_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
         )
 
     elif query.data == 'back':
@@ -438,8 +436,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔴 Invalid: {user_sessions[user_id]['invalid']}\n"
             f"🌍 Region Locked: {user_sessions[user_id]['region_locked']}"
         )
-        
-        await update.message.reply_text(summary, parse_mode="Markdown")
         
         context.user_data['awaiting_account'] = False
         context.user_data['awaiting_codes'] = False
