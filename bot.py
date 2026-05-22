@@ -110,7 +110,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await update.message.document.get_file()
         file_path = f"temp_{update.message.document.file_name}"
         await file.download_to_drive(file_path)
-if file_path.endswith('.zip'):
+        
+        if file_path.endswith('.zip'):
             contents = extract_zip(file_path)
             for content in contents[:10]:  # Limit to 10 for safety
                 result = check_netflix_cookies(content)
@@ -138,12 +139,12 @@ if file_path.endswith('.zip'):
     await update.message.reply_text(msg)
 
 # ====================== MAIN ======================
-if name == "main":
+if __name__ == "__main__":
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
 
     print("Bot is running...")
