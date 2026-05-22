@@ -1,1 +1,9 @@
-{\n  \"$schema\": \"https://railway.app/railway.schema.json\",\n  \"build\": {\n    \"builder\": \"DOCKERFILE\"\n  },\n  \"deploy\": {\n    \"startCommand\": \"python bot.py\"\n  }\n}\n
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE"
+  },
+  "deploy": {
+    "startCommand": "python bot.py"
+  }
+}
