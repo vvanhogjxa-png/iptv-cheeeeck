@@ -444,6 +444,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting_account'] = False
         context.user_data['awaiting_codes'] = False
 
+async def error_handler(update, context):
+    print(f"⚠️ Error: {context.error}")
+
 def main():
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN not set!")
@@ -457,10 +460,17 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_click))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(lambda update, context: print(f"Error: {context.error}"))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message
+        )
+    )
 
-    print("🚀 Bot started!")
+    # Fixed async error handler
+    app.add_error_handler(error_handler)
+
+    print("🚀 Bot started successfully!")
     app.run_polling()
 
 if __name__ == "__main__":
